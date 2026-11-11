@@ -1,0 +1,154 @@
+---
+title: "REACT Long COVID 2026 analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r libraries}
+library(tidyverse) # data wrangling and plotting
+library(broom)     # tidy model output
+library(knitr)     # tables
+```
+
+```{r load-data}
+react_lc <- readRDS("react_lc_2026.rds")
+
+dim(react_lc)
+glimpse(react_lc)
+```
+```{r data_cleaning}
+
+```
+
+
+
+```{r healtha}
+# HEALTHA = 1 if any HEALTHA_ item is 1; 0 if none is 1 and at least one is 0;
+# NA if no item has a valid 0/1 answer (only -77/-92 codes)
+react_lc <- readRDS("react_lc_2026.rds")
+
+
+react_lc <- 
+  react_lc %>% 
+  distinct()%>%
+  filter(EMPL %in% c(1:4),U_AGE >= 18,
+  str_detect(
+    U_PASSCODE,
+    "^SYN-REACT1-R(14|15|16|17|18|19)-")) %>%
+  mutate(
+    HEALTHA = case_when(
+    if_any(starts_with("HEALTHA_"), ~ .x == 1) ~ 1L,
+    if_all(starts_with("HEALTHA_"), ~ .x == 0) ~ 0L,
+    TRUE ~ NA_integer_),
+    Healthcare = case_when(
+      if_any(WORKTYP1_1:WORKTYP1_4, ~ .x == 1) ~ 1L,
+      WORKTYP1_5 == 1 | WORKTYP1_6 == 1 ~ 0L,
+      TRUE ~ NA_integer_),
+  LONGCOVID = case_when(
+  LONGCOVID1 %in% c(1, 2) ~ 1L,
+  LONGCOVID1 %in% c(3, 4) ~ 0L,
+  TRUE ~ NA_integer_),
+    U_GENDER = factor(U_GENDER, levels = c(1, 2)),
+    IMD_quintile = factor(
+      case_when(
+        IMD_DECILE %in% 1:10 ~ ceiling(IMD_DECILE / 2)),
+      levels = 1:5
+    ))%>%
+  select(U_PASSCODE,LONGCOVID,Healthcare,U_GENDER, U_AGE, IMD_quintile,HEALTHA)%>%
+  drop_na()
+```
+
+## Logistic regression model
+
+The model estimates the log-odds of long COVID from healthcare work, age, sex and HEALTHA:
+
+$$\log\left(\frac{p}{1-p}\right) = \beta_0 + \beta_1\,\text{Healthcare} + \beta_2\,\text{Age} + \beta_3\,\text{Sex} + \beta_4\,\text{HEALTHA}$$
+
+where $p$ is the probability of long COVID.
+
+```{r logistic regression model}
+fit_lc <- glm(LONGCOVID ~ Healthcare + U_AGE + U_GENDER + HEALTHA, family = "binomial", data = react_lc)
+summary(fit_lc)
+```
+
+```{r model-numbers, include=FALSE}
+# Values used in the text below, so it updates if the data or model change
+b <- coef(fit_lc)
+coef_txt <- function(x) sprintf("%s %.3f", ifelse(x < 0, "-", "+"), abs(x))
+fmt_p <- function(p) ifelse(p < 0.001, "< 0.001", sprintf("= %.3f", p))
+
+n_model <- nobs(fit_lc)
+n_lc    <- sum(fit_lc$y)
+
+ci <- tidy(fit_lc, exponentiate = TRUE, conf.int = TRUE)
+or_txt <- function(t) {
+  r <- ci[ci$term == t, ]
+  sprintf("OR %.2f, 95%% CI %.2f–%.2f, p %s", r$estimate, r$conf.low, r$conf.high, fmt_p(r$p.value))
+}
+age10 <- exp(10 * c(b["U_AGE"], confint(fit_lc)["U_AGE", ]))
+
+grp <- react_lc %>% group_by(Healthcare) %>% summarise(n = n(), pct = 100 * mean(LONGCOVID))
+pct_hcw   <- grp$pct[grp$Healthcare == 1]
+pct_other <- grp$pct[grp$Healthcare == 0]
+
+lrt <- anova(update(fit_lc, . ~ 1), fit_lc, test = "Chisq")
+
+p_hat <- fitted(fit_lc); y <- fit_lc$y
+auc <- (sum(rank(p_hat)[y == 1]) - sum(y) * (sum(y) + 1) / 2) / (sum(y) * sum(1 - y))
+```
+
+The fitted equation is:
+
+$$\log\left(\frac{p}{1-p}\right) = `r sprintf("%.3f", b[1])` `r coef_txt(b["Healthcare"])`\,\text{Healthcare} `r coef_txt(b["U_AGE"])`\,\text{Age} `r coef_txt(b["U_GENDER2"])`\,\text{Sex} `r coef_txt(b["HEALTHA"])`\,\text{HEALTHA}$$
+
+## Odds ratios and 95% confidence intervals
+
+Odds ratios are the exponentiated coefficients. The 95% confidence intervals are profile-likelihood intervals.
+
+```{r Odds Ratio and 95% Confidence Interval}
+or_table <- tidy(fit_lc, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  # Rescale age from per year to per 10 years (OR^10, and the same for the CI limits)
+  mutate(across(c(estimate, conf.low, conf.high),
+                ~ if_else(term == "U_AGE", .x^10, .x))) %>%
+  mutate(
+    term = recode(term,
+      Healthcare = "Healthcare worker (vs other worker)",
+      U_AGE      = "Age (per 10 years)",
+      U_GENDER2  = "Sex: U_GENDER 2 (vs 1)",
+      HEALTHA    = "HEALTHA: any condition (vs none)"),
+    p.value = format.pval(p.value, digits = 2, eps = 0.001)
+  ) %>%
+  select(Variable = term, OR = estimate, `95% CI lower` = conf.low,
+         `95% CI upper` = conf.high, `p-value` = p.value)
+
+kable(or_table, digits = 2)
+```
+
+## Interpretation
+
+<!-- The numbers below come from the model and update automatically. The wording
+     (e.g. "statistically significant") was written for the results as of 2026-11-11,
+     so re-check it if the data or model change. -->
+
+**Sample.** The model includes `r n_model` adults from rounds 14–19 with `EMPL` codes 1–4. Of these, `r n_lc` (`r sprintf("%.1f", 100 * n_lc / n_model)`%) reported long COVID.
+
+**Healthcare work.** After adjusting for age, sex and HEALTHA, healthcare workers had about twice the odds of long COVID compared with other workers (`r or_txt("Healthcare")`). The confidence interval excludes 1, so the association is statistically significant at the 5% level. In the raw data, `r sprintf("%.1f", pct_hcw)`% of healthcare workers reported long COVID compared with `r sprintf("%.1f", pct_other)`% of other workers. Because long COVID is common in this sample, the odds ratio overstates the relative risk: healthcare workers were about `r sprintf("%.1f", pct_hcw / pct_other)` times as likely to report it, not twice as likely.
+
+**Sex.** People with `U_GENDER` code 2 had higher odds of long COVID than those with code 1 (`r or_txt("U_GENDER2")`). Check the codebook for which code is male and which is female before reporting this.
+
+**Age.** Age showed no clear association with long COVID. Per 10 years of age the odds ratio is `r sprintf("%.2f (95%% CI %.2f–%.2f, p %s)", age10[1], age10[2], age10[3], fmt_p(ci$p.value[ci$term == "U_AGE"]))`, and the interval includes 1.
+
+**HEALTHA.** Having at least one of the health conditions was not associated with long COVID (`r or_txt("HEALTHA")`). The interval is wide, so a modest effect in either direction can't be ruled out.
+
+**Model fit.** Together the predictors improve significantly on a model with no predictors (likelihood ratio χ² = `r sprintf("%.1f", lrt$Deviance[2])`, df = `r lrt$Df[2]`, p `r fmt_p(lrt[["Pr(>Chi)"]][2])`). However, they separate people with and without long COVID only weakly (AUC = `r sprintf("%.2f", auc)`, where 0.5 is chance), so most of the variation in long COVID is explained by factors not in the model.
+
+**Limitations.** These are associations from cross-sectional, self-reported data, not causal effects. The estimates are unweighted, so they describe this sample rather than the population. Unmeasured factors such as workplace exposure, vaccination and deprivation could explain part of the healthcare association.

@@ -1,0 +1,13 @@
+# Data (not shared; place react_lc_2026.rds in this folder to run the analysis)
+*.rds
+*.csv
+
+# R and RStudio
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+
+# macOS
+.DS_Store
